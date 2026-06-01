@@ -1,0 +1,869 @@
+/************************************************
+*                                               *        
+* Mapping Nypa in West Africa                   * 
+*                                               * 
+* Script aim:                                   *
+*                                               *
+* Contact/s: Sophia                             *
+*                                               *
+* Global Ecology Lab, James Cook University     *
+*                                               *
+* Date: June 2026                                *
+*                                               *  
+*************************************************/
+
+/***********************************************
+Description of script: Full script for mapping Nypa fruticans
+and comparing Nypa to mangrove extent at two sites in Nigeria
+
+************************************************/
+
+/***********************************************
+*                                              *
+* 1. Set up                                    *
+*                                              *
+************************************************/
+
+/****************************
+* 1.a Set up parameters *
+*****************************/
+
+Map.setOptions('SATELLITE');
+
+var scale = 10;
+var split = 0.7;
+var seed = 123
+var spatialBufferDistance = 50; //meters
+
+var gmw = ee.ImageCollection('LANDSAT/MANGROVE_FORESTS').mosaic();
+
+/**********************************
+* 1.b Import data for test region *
+***********************************/
+
+//import feature collections used for classifications created in separate script
+var nypa = ee.FeatureCollection('projects/west-africa-466003/assets/nypa');
+var mangrove = ee.FeatureCollection('projects/west-africa-466003/assets/mangrove');
+var infrastructure = ee.FeatureCollection('projects/west-africa-466003/assets/infrastructure');
+var water = ee.FeatureCollection('projects/west-africa-466003/assets/water');
+
+//import embeddings dataset
+var embeddings = ee.ImageCollection('GOOGLE/SATELLITE_EMBEDDING/V1/ANNUAL');
+
+//import testsite asset for area of interest 
+var testsite = ee.FeatureCollection('projects/west-africa-466003/assets/testsite');
+
+// centers map on testsite 
+Map.centerObject(testsite, 13);
+
+/****************************
+* 1.c Clean embeddings data *
+*****************************/
+
+//filter embeddings dataset for year of interest (2025) within testsite boundary
+//mosaics filtered images, and clips to testsite
+var year = 2025;
+var startDate = ee.Date.fromYMD(year, 1, 1);
+var endDate = startDate.advance(1, 'year');
+var embeddingsImage = embeddings
+.filter(ee.Filter.date(startDate, endDate))
+.filter(ee.Filter.bounds(testsite))
+.mosaic()
+.clip(testsite);
+
+
+/****************************
+* 1.d Clean training points *
+*****************************/
+
+//merge training points into one collection
+var classProperty = 'class';
+var nypa_labeled = nypa.map(function(feature) {
+  return feature.set(classProperty, 0); // Nypa = 0
+});
+var mangrove_labeled = mangrove.map(function(feature) {
+  return feature.set(classProperty, 1); // Mangrove = 1
+});
+var infrastructure_labeled = infrastructure.map(function(feature) {
+  return feature.set(classProperty, 2); // Infrastructure = 2
+});
+var water_labeled = water.map(function(feature) {
+  return feature.set(classProperty, 3); // Water = 3
+});
+var allTrainingPoints = ee.FeatureCollection([
+  nypa_labeled,
+  mangrove_labeled,
+  infrastructure_labeled,
+  water_labeled
+]).flatten(); 
+
+/***********************************************
+*                                              *
+* X. Random train-test validation              *
+*                                              *
+************************************************/
+
+/**********************
+* X.x split the data *
+***********************/
+
+//spatial split to prevent autocorrelation
+
+// Define the split percentage (0.7 = 70% for training, 30% for validation)
+
+//add random column
+var allPointsWithRandom = allTrainingPoints.randomColumn({
+  columnName:'random',
+  seed:seed
+});
+
+// Get 70% of the data for training
+var trainingSetPoints = allPointsWithRandom.filter(
+  ee.Filter.lt('random', split)
+);
+
+// Get the remaining 30% for validation
+var validationSetPoints = allPointsWithRandom.filter(
+  ee.Filter.gte('random', split)
+);
+
+
+
+/**********************
+* X.x spatial filter *
+***********************/
+
+//define spatial filter --> Ensures no test point is within x meters of any training point
+var spatialFilter = ee.Filter.withinDistance({
+  distance:spatialBufferDistance,
+  leftField:'.geo',
+  rightField:'.geo',
+  maxError:10
+});
+
+//inverted join --> no matches between points in each collection
+var invertedJoin = ee.Join.inverted();
+var spatiallyIndependentValidationPoints = ee.FeatureCollection(invertedJoin.apply(
+  validationSetPoints,
+  trainingSetPoints,
+  spatialFilter));
+  
+  
+/**********************
+* X.x print results *
+
+
+print('Original validation points:', validationSetPoints.size());
+print('Spatially independent points (Total):', spatiallyIndependentValidationPoints.size());
+
+print('N points in dataset: ', {
+  Original_validation_points: validationSetPoints.size(),
+  Spatially_independent_points: spatiallyIndependentValidationPoints.size()
+ 
+});
+
+// Check the counts for each class
+print('Count of independent Nypa (Class 0):', 
+    spatiallyIndependentValidationPoints.filter(ee.Filter.eq('class', 0)).size());
+print('Count of independent Mangrove (Class 1):', 
+    spatiallyIndependentValidationPoints.filter(ee.Filter.eq('class', 1)).size());
+print('Count of independent Infrastructure (Class 2):', 
+    spatiallyIndependentValidationPoints.filter(ee.Filter.eq('class', 2)).size());
+print('Count of independent Water (Class 3):', 
+    spatiallyIndependentValidationPoints.filter(ee.Filter.eq('class', 3)).size());
+
+print('N points in dataset: ', {
+  n_independent_Nypa: spatiallyIndependentValidationPoints.filter(ee.Filter.eq('class', 0)).size(),
+  n_independent_Mangrove: spatiallyIndependentValidationPoints.filter(ee.Filter.eq('class', 1)).size(),
+  n_independent_Infrastructure: spatiallyIndependentValidationPoints.filter(ee.Filter.eq('class', 2)).size(),
+  n_independent_Water: spatiallyIndependentValidationPoints.filter(ee.Filter.eq('class', 3)).size(),
+});
+
+
+
+/**********************
+* X.x Extract point  *
+***********************/
+
+var trainingSet = embeddingsImage.sampleRegions({
+  collection: trainingSetPoints,
+  properties: [classProperty],
+  scale:scale,
+});
+
+var validationSet = embeddingsImage.sampleRegions({
+  collection: spatiallyIndependentValidationPoints,
+  properties: [classProperty],
+  scale:scale,
+});
+
+// Instead of using the random split
+var fullSet = embeddingsImage.sampleRegions({
+  collection: allTrainingPoints,
+  properties: [classProperty],
+  scale: scale,
+});
+
+/**********************
+* X.x Build model  *
+***********************/
+
+//initialize and train classifier
+var classifier = ee.Classifier.smileRandomForest({
+  numberOfTrees: 200,
+  variablesPerSplit: 8, // default is the sq root of number of total covariates (square root of 64 = 8)
+  bagFraction: 0.8,
+  maxNodes: 8,
+  seed: 123
+});
+
+var trainedClassifier = classifier.train({
+  features: trainingSet, // fullSet instead of randomly split data
+  classProperty: classProperty,
+  inputProperties: bands
+});
+
+/**********************
+* X.x Predict *
+***********************/
+
+// classify entire image 
+var classifiedImage = embeddingsImage.classify(trainedClassifier);
+
+//visualize result of RF classification on map
+var classPalette = [
+  'EE3377',//0 = nypa
+'228833',//1 = mangrove
+'BBBBBB',//2 = infrastructure
+'4477AA'//3 = water
+];
+
+Map.addLayer(classifiedImage,{min:0,max:3,palette:classPalette},'Testsite Classification Map');
+
+//classify the validation dataset
+var validationResults = validationSet.classify(trainedClassifier);
+
+
+//compare actual class property with classification model results
+var testsiteerrorMatrix = validationResults.errorMatrix(classProperty, 'classification');
+
+print('Testsite Model Accuracy');
+print('Testsite Error Matrix:', testsiteerrorMatrix);
+print('Testsite Overall Accuracy:', testsiteerrorMatrix.accuracy());
+print('Testsite Kappa Coefficient:', testsiteerrorMatrix.kappa());
+print('Testsite Producers Accuracy (Omission Errors):', testsiteerrorMatrix.producersAccuracy());
+print('Testsite Consumers Accuracy (Commission Errors):', testsiteerrorMatrix.consumersAccuracy());
+
+var testsiteErrorMatrix = validationResults.errorMatrix(classProperty, 'classification');
+
+print('Testsite OA:', testsiteErrorMatrix.accuracy());
+print('Testsite Kappa:', testsiteErrorMatrix.kappa());
+
+Export.table.toDrive({
+  collection: validationResults,
+  description: 'testsite_validation_Results',
+  fileFormat: 'CSV',
+  selectors: [classProperty, 'classification']
+});
+
+var testsiteImportance = trainedClassifier.explain();
+var importanceDict = ee.Dictionary(testsiteImportance.get('importance'));
+
+var importanceFeature = ee.Feature(null, importanceDict);
+
+Export.table.toDrive({
+  collection: ee.FeatureCollection([importanceFeature]),
+  description: 'Testsite_Feature_Importance',
+  fileFormat: 'CSV'
+});
+
+var pixelArea = ee.Image.pixelArea();
+
+var areaImage = pixelArea.addBands(classifiedImage);
+
+var classAreas = areaImage.reduceRegion({
+  reducer: ee.Reducer.sum().group({
+    groupField: 1, // The 'classification' band
+    groupName: 'class',
+  }),
+  geometry: testsite.geometry(), 
+  scale: scale,
+  maxPixels: 1e10
+});
+
+print('Test Site Class Areas (in sq. meters):', classAreas);
+
+var bands = ee.List.sequence(0, 63).map(function(n) {
+  return ee.Number(n).format('A%02d');
+});
+
+Export.table.toDrive({
+  collection: validationResults, 
+  description: 'testsite_with_embeddings',
+  fileFormat: 'CSV',
+  selectors: ['class', 'classification'].concat(bands.getInfo()) // .getInfo() turns the EE list into a JS list
+});
+/***********************************************
+*                                              *
+* X. Ramsar site                                    *
+*                                              *
+************************************************/
+
+
+//NEW TEST OF MODEL AT APOI CREEK SITE
+
+//testing model at apoi creek forest site
+Map.centerObject(apoi,13);
+
+/**********************
+* X.x load embedding data *
+***********************/
+
+var apoiEmbeddings = embeddings
+.filter(ee.Filter.date(startDate,endDate))
+.filter(ee.Filter.bounds(apoi))
+.mosaic()
+.clip(apoi);
+
+
+/**********************
+* X.x Predict spatially using testsite model*
+***********************/
+
+var classifiedApoi = apoiEmbeddings.classify(trainedClassifier);
+
+Map.addLayer(
+classifiedApoi,
+  {min:0,max:3,palette: classPalette},
+  'Apoi Classifications');
+  
+/**********************************
+* X.x Load Apoi data *
+***********************************/
+// spatial filter
+var apoinypa_labeled = apoinypa.map(function(feature) {
+  return feature.set(classProperty, 0); // Nypa = 0
+});
+var apoimangrove_labeled = apoiother.map(function(feature) {
+  return feature.set(classProperty, 1); // Mangrove = 1
+});
+var apoiinfrastructure_labeled = apoiinfra.map(function(feature) {
+  return feature.set(classProperty, 2); // Infrastructure = 2
+});
+var apoiwater_labeled = apoiwater.map(function(feature) {
+  return feature.set(classProperty, 3); // Water = 3
+});
+var apoiPoints = ee.FeatureCollection([
+  apoinypa_labeled,
+  apoimangrove_labeled,
+  apoiinfrastructure_labeled,
+  apoiwater_labeled
+]).flatten(); 
+
+var apoivalidationResults = classifiedApoi.sampleRegions({
+  collection: apoiPoints,
+  properties: [classProperty],
+  scale: 10,
+  geometries: true
+});
+
+var apoivalidationResults = classifiedApoi.sampleRegions({
+  collection: apoiPoints,
+  properties: [classProperty],
+  scale: 10,
+  geometries: true
+});
+
+var errorMatrix = apoivalidationResults.errorMatrix(classProperty, 'classification');
+
+print('Apoi Model Accuracy');
+print('Apoi Error Matrix:', errorMatrix);
+var transferErrorMatrix = apoivalidationResults.errorMatrix(classProperty, 'classification');
+
+print('--- 2. APOI TRANSFER RESULTS ---');
+print('Transfer OA:', transferErrorMatrix.accuracy());
+print('Transfer Kappa:', transferErrorMatrix.kappa());
+/********************************************************
+* X.x matrix/confusion exports *
+*********************************************************/
+
+var matrixArray = ee.Array(errorMatrix.array());
+var nRows = matrixArray.length().get([0]);
+
+var matrixTable = ee.FeatureCollection(
+  ee.List.sequence(0, nRows.subtract(1)).map(function(i){
+    return ee.Feature(null, {
+      row: i,
+      values: matrixArray.toList().get(i)
+    });
+  })
+);
+
+Export.table.toDrive({
+  collection: apoivalidationResults,
+  description: 'apoi_validation_results',
+  fileFormat: 'CSV',
+  selectors: [classProperty, 'classification']
+});
+
+/********************************************************
+* X.x Classify APOI site using full classifier and spatial split with collected training data *
+*********************************************************/
+//spatial split to prevent autocorrelation
+// Define the split percentage (0.7 = 70% for training, 30% for validation)
+
+var apoiPointsWithRandom = apoiPoints.randomColumn({
+  columnName:'random',
+  seed:seed
+});
+
+// Get 70% of the data for training
+var apoitrainingSetPoints = apoiPointsWithRandom.filter(
+  ee.Filter.lt('random', split)
+);
+
+// Get the remaining 30% for validation
+var apoivalidationSetPoints = apoiPointsWithRandom.filter(
+  ee.Filter.gte('random', split)
+);
+
+/**********************
+* X.x spatial filter *
+***********************/
+
+var apoispatialFilter = ee.Filter.withinDistance({
+  distance:spatialBufferDistance,
+  leftField:'.geo',
+  rightField:'.geo',
+  maxError:10
+});
+
+var apoiinvertedJoin = ee.Join.inverted();
+var apoispatiallyIndependentValidationPoints = ee.FeatureCollection(
+  apoiinvertedJoin.apply(
+    apoivalidationSetPoints,
+    apoitrainingSetPoints,
+    apoispatialFilter
+));
+
+var apoitrainingSet = apoiEmbeddings.sampleRegions({
+  collection: apoitrainingSetPoints,
+  properties: [classProperty],
+  scale: scale
+});
+
+var apoivalidationSet = apoiEmbeddings.sampleRegions({
+  collection: apoispatiallyIndependentValidationPoints,
+  properties: [classProperty],
+  scale: scale
+});
+
+var apoifullSet = apoiEmbeddings.sampleRegions({
+  collection: apoiPoints,
+  properties: [classProperty],
+  scale: scale,
+});
+
+var bands = embeddingsImage.bandNames();
+  
+/**********************
+* X.x Build model  *
+***********************/
+
+//initialize and train classifier
+var apoiclassifier = ee.Classifier.smileRandomForest({
+  numberOfTrees: 200,
+  variablesPerSplit: 8, // default is the sq root of number of total covariates (square root of 64 = 8)
+  bagFraction: 0.8,
+  maxNodes: 8, 
+  seed: 123 
+});
+
+var apoitrainedClassifier = apoiclassifier.train({
+  features: apoitrainingSet, // fullSet instead of randomly split data
+  classProperty: classProperty,
+  inputProperties: bands
+});
+
+/**********************
+* X.x Predict for apoi*
+***********************/
+
+var apoiclassifiedImage = apoiEmbeddings.classify(apoitrainedClassifier);
+
+Map.addLayer(apoiclassifiedImage,{min:0,max:3,palette:classPalette},'Apoi Full Classification Map');
+
+var apoivalidationResults2 = apoivalidationSet.classify(apoitrainedClassifier);
+
+var apoierrorMatrix2 = apoivalidationResults2.errorMatrix(
+  classProperty,
+  'classification'
+);
+
+print('Apoi Error Matrix 2:', apoierrorMatrix2);
+print('Apoi Overall Accuracy 2:', apoierrorMatrix2.accuracy());
+print('Apoi Kappa Coefficient 2:', apoierrorMatrix2.kappa());
+print('Apoi Producers Accuracy 2:', apoierrorMatrix2.producersAccuracy());
+print('Apoi Consumers Accuracy 2:', apoierrorMatrix2.consumersAccuracy());
+
+var apoimatrixArray2 = ee.Array(apoierrorMatrix2.array());
+var nRows = apoimatrixArray2.length().get([0]);
+
+var apoimatrixFeatures = ee.FeatureCollection(
+  ee.List.sequence(0, nRows.subtract(1)).map(function(i){
+    var row = apoimatrixArray2.slice(0, i, ee.Number(i).add(1));
+    return ee.Feature(null, {
+      row: i,
+      values: row.toList()
+    });
+  })
+);
+
+Export.table.toDrive({
+collection: apoivalidationResults2,
+description: 'apoi_trained_predictions',
+fileFormat: 'CSV'
+});
+
+/**********************
+* X.x add global mangrove distribution layer*
+***********************/
+
+var gmwVis = {
+  min: 0,
+  max: 1.0,
+  palette: ['44AA99'],
+};
+var gmw_testsite = gmw.clip(testsite);
+
+Map.addLayer(
+  gmw_testsite.updateMask(gmw_testsite),
+  gmwVis,
+  'GMW (Testsite)'
+);
+var gmw_apoi = gmw.clip(apoi);
+
+Map.addLayer(
+  gmw_apoi.updateMask(gmw_apoi),
+  gmwVis,
+  'GMW (Apoi)'
+);
+
+/**********************
+* X.x Add shape boundaries for testsite and apoi*
+***********************/
+
+var apoi_styled = apoi.style({
+  color: '000000',      // black outline
+  width: 2,
+  fillColor: '00000000' // Fully transparent fill
+});
+
+var testsite_styled = testsite.style({
+  color: '000000',      // black outline
+  width: 2,
+  fillColor: '00000000' // Fully transparent fill
+});
+
+// Add the styled layers to the map
+Map.addLayer(apoi_styled, {}, 'Apoi Transparent');
+Map.addLayer(testsite_styled, {}, 'TestsiteTransparent');
+
+/**********************
+* X.x visualize only nypa class at testsite and apoi*
+***********************/
+
+var nypa_testsite = classifiedImage.eq(0);  // isolate class 0
+
+Map.addLayer(
+  nypa_testsite.updateMask(nypa_testsite),
+  {palette: ['EE3377']},   
+  'Testsite Nypa Only'
+);
+
+var nypa_apoi_local = apoiclassifiedImage.eq(0);
+
+Map.addLayer(
+  nypa_apoi_local.updateMask(nypa_apoi_local),
+  {palette: ['EE3377']},   
+  'Apoi Nypa Only (Local)'
+);
+
+/**********************
+ * X.x map of nypa, mangroves, and agreement areas
+ **********************/
+
+// --- APOI ---
+var nypa_apoi_mask = apoiclassifiedImage.eq(0).unmask(0);
+var mangroves_apoi_img = ee.ImageCollection('LANDSAT/MANGROVE_FORESTS')
+  .mosaic()
+  .clip(apoi)
+  .unmask(0);
+
+var combined_apoi = mangroves_apoi_img.multiply(1)
+  .add(nypa_apoi_mask.multiply(2));
+// Values: 0=nothing, 1=mangrove only, 2=nypa only, 3=overlap
+// Consistent with classPalette
+Map.addLayer(
+  combined_apoi.updateMask(combined_apoi.neq(0)), 
+  {
+    min: 1, max: 3,
+   palette: [
+    '#44AA99',  // 1 = GMW mangrove only
+    '#EE3377',  // 2 = nypa only
+    '#EE9933'   // 3 = overlap
+  ]},
+  'Nypa vs Mangrove (Apoi)');
+
+// --- TESTSITE ---
+var nypa_test_mask = classifiedImage.eq(0).unmask(0);
+var mangroves_test_img = ee.ImageCollection('LANDSAT/MANGROVE_FORESTS')
+  .mosaic()
+  .clip(testsite)
+  .unmask(0);
+
+var combined_test = mangroves_test_img.multiply(1)
+  .add(nypa_test_mask.multiply(2));
+
+Map.addLayer(
+  combined_test.updateMask(combined_test.neq(0)),
+  {
+    min: 1, max: 3,
+    palette: [
+    '#44AA99',  // 1 = GMW mangrove only
+    '#EE3377',  // 2 = nypa only
+    '#EE9933'   // 3 = overlap
+  ]
+  },
+  'Nypa vs Mangrove (Testsite)'
+);
+
+/**********************
+ * X.x Area statistics - proportion of mangrove that is Nypa
+ **********************/
+
+function calcClassAreas(combinedImg, region, label) {
+  
+  // Mangrove only (value = 1)
+  var mangrove_only = combinedImg.eq(1);
+  // Nypa only (value = 2)
+  var nypa_only = combinedImg.eq(2);
+  // Overlap/intersection (value = 3)
+  var overlap = combinedImg.eq(3);
+
+  var areaImage = ee.Image.pixelArea().divide(10000); // convert m² to hectares
+
+  // Calculate areas
+  var mangrove_area = areaImage.updateMask(mangrove_only).reduceRegion({
+    reducer: ee.Reducer.sum(),
+    geometry: region,
+    scale: 30,
+    maxPixels: 1e13
+  });
+
+  var nypa_area = areaImage.updateMask(nypa_only).reduceRegion({
+    reducer: ee.Reducer.sum(),
+    geometry: region,
+    scale: 30,
+    maxPixels: 1e13
+  });
+
+  var overlap_area = areaImage.updateMask(overlap).reduceRegion({
+    reducer: ee.Reducer.sum(),
+    geometry: region,
+    scale: 30,
+    maxPixels: 1e13
+  });
+
+  // Total mangrove footprint = mangrove only + overlap
+  var total_mangrove = ee.Number(mangrove_area.get('area'))
+    .add(ee.Number(overlap_area.get('area')));
+
+  // Nypa within mangrove = overlap area (pixels that are BOTH)
+  var nypa_in_mangrove = ee.Number(overlap_area.get('area'));
+
+  // Proportion of mangrove area that is also Nypa
+  var proportion = nypa_in_mangrove.divide(total_mangrove).multiply(100);
+
+  print('--- ' + label + ' ---');
+  print('Mangrove only area (ha):', mangrove_area.get('area'));
+  print('Nypa only area (ha):', nypa_area.get('area'));
+  print('Overlap area / Nypa within Mangrove (ha):', overlap_area.get('area'));
+  print('Total mangrove footprint (ha):', total_mangrove);
+  print('% of mangrove area that is Nypa:', proportion);
+}
+
+
+calcClassAreas(combined_apoi, apoi.geometry(), 'Apoi');
+calcClassAreas(combined_test, testsite.geometry(), 'Testsite');
+
+/**********************
+* X.x Print dataset counts for thesis
+***********************/
+
+// --- TESTSITE ---
+print('=== TESTSITE POINT COUNTS ===');
+
+print('Testsite Total points:', allTrainingPoints.size());
+
+print('Testsite Total points by class:', {
+  n_total_Nypa:           allTrainingPoints.filter(ee.Filter.eq('class', 0)).size(),
+  n_total_Mangrove:       allTrainingPoints.filter(ee.Filter.eq('class', 1)).size(),
+  n_total_Infrastructure: allTrainingPoints.filter(ee.Filter.eq('class', 2)).size(),
+  n_total_Water:          allTrainingPoints.filter(ee.Filter.eq('class', 3)).size()
+});
+
+print('Testsite Training points (70%):', trainingSetPoints.size());
+
+print('Testsite Training points by class:', {
+  n_training_Nypa:           trainingSetPoints.filter(ee.Filter.eq('class', 0)).size(),
+  n_training_Mangrove:       trainingSetPoints.filter(ee.Filter.eq('class', 1)).size(),
+  n_training_Infrastructure: trainingSetPoints.filter(ee.Filter.eq('class', 2)).size(),
+  n_training_Water:          trainingSetPoints.filter(ee.Filter.eq('class', 3)).size()
+});
+
+print('Testsite Validation points (30%, before spatial filter):', validationSetPoints.size());
+
+print('Testsite Validation points by class (before spatial filter):', {
+  n_validation_Nypa:           validationSetPoints.filter(ee.Filter.eq('class', 0)).size(),
+  n_validation_Mangrove:       validationSetPoints.filter(ee.Filter.eq('class', 1)).size(),
+  n_validation_Infrastructure: validationSetPoints.filter(ee.Filter.eq('class', 2)).size(),
+  n_validation_Water:          validationSetPoints.filter(ee.Filter.eq('class', 3)).size()
+});
+
+print('Testsite Spatially independent validation points (after spatial filter):', 
+  spatiallyIndependentValidationPoints.size());
+
+print('Testsite Spatially independent validation points by class:', {
+  n_independent_Nypa:           spatiallyIndependentValidationPoints.filter(ee.Filter.eq('class', 0)).size(),
+  n_independent_Mangrove:       spatiallyIndependentValidationPoints.filter(ee.Filter.eq('class', 1)).size(),
+  n_independent_Infrastructure: spatiallyIndependentValidationPoints.filter(ee.Filter.eq('class', 2)).size(),
+  n_independent_Water:          spatiallyIndependentValidationPoints.filter(ee.Filter.eq('class', 3)).size()
+});
+
+// --- APOI ---
+print('=== APOI POINT COUNTS ===');
+
+print('Apoi Total points:', apoiPoints.size());
+
+print('Apoi Total points by class:', {
+  n_total_Nypa:           apoiPoints.filter(ee.Filter.eq('class', 0)).size(),
+  n_total_Mangrove:       apoiPoints.filter(ee.Filter.eq('class', 1)).size(),
+  n_total_Infrastructure: apoiPoints.filter(ee.Filter.eq('class', 2)).size(),
+  n_total_Water:          apoiPoints.filter(ee.Filter.eq('class', 3)).size()
+});
+
+print('Apoi Training points (70%):', apoitrainingSetPoints.size());
+
+print('Apoi Training points by class:', {
+  n_training_Nypa:           apoitrainingSetPoints.filter(ee.Filter.eq('class', 0)).size(),
+  n_training_Mangrove:       apoitrainingSetPoints.filter(ee.Filter.eq('class', 1)).size(),
+  n_training_Infrastructure: apoitrainingSetPoints.filter(ee.Filter.eq('class', 2)).size(),
+  n_training_Water:          apoitrainingSetPoints.filter(ee.Filter.eq('class', 3)).size()
+});
+
+print('Apoi Validation points (30%, before spatial filter):', apoivalidationSetPoints.size());
+
+print('Apoi Validation points by class (before spatial filter):', {
+  n_validation_Nypa:           apoivalidationSetPoints.filter(ee.Filter.eq('class', 0)).size(),
+  n_validation_Mangrove:       apoivalidationSetPoints.filter(ee.Filter.eq('class', 1)).size(),
+  n_validation_Infrastructure: apoivalidationSetPoints.filter(ee.Filter.eq('class', 2)).size(),
+  n_validation_Water:          apoivalidationSetPoints.filter(ee.Filter.eq('class', 3)).size()
+});
+
+print('Apoi Spatially independent validation points (after spatial filter):', 
+  apoispatiallyIndependentValidationPoints.size());
+
+print('Apoi Spatially independent validation points by class:', {
+  n_independent_Nypa:           apoispatiallyIndependentValidationPoints.filter(ee.Filter.eq('class', 0)).size(),
+  n_independent_Mangrove:       apoispatiallyIndependentValidationPoints.filter(ee.Filter.eq('class', 1)).size(),
+  n_independent_Infrastructure: apoispatiallyIndependentValidationPoints.filter(ee.Filter.eq('class', 2)).size(),
+  n_independent_Water:          apoispatiallyIndependentValidationPoints.filter(ee.Filter.eq('class', 3)).size()
+});
+
+/**********************
+ * X.x Probability maps - Nypa only (main results)
+ **********************/
+
+// Set all three classifiers to MULTIPROBABILITY mode
+var probClassifier_parrot = trainedClassifier.setOutputMode('MULTIPROBABILITY');
+var probClassifier_direct = trainedClassifier.setOutputMode('MULTIPROBABILITY'); // same model, transferred
+var probClassifier_apoi   = apoitrainedClassifier.setOutputMode('MULTIPROBABILITY');
+
+// Extract Nypa probability (index 0) for each model
+var nypaProb_parrot = embeddingsImage.classify(probClassifier_parrot).arrayGet(0);
+var nypaProb_direct = apoiEmbeddings.classify(probClassifier_direct).arrayGet(0);
+var nypaProb_apoi   = apoiEmbeddings.classify(probClassifier_apoi).arrayGet(0);
+
+var nypaVis = {min: 0, max: 1, palette: ['white', '#EE3377']};
+
+Map.addLayer(nypaProb_parrot, nypaVis, 'Nypa Probability - Parrot Island');
+Map.addLayer(nypaProb_direct, nypaVis, 'Nypa Probability - Apoi Direct Transfer');
+Map.addLayer(nypaProb_apoi,   nypaVis, 'Nypa Probability - Apoi Local Model');
+
+Export.image.toDrive({
+  image:       nypaProb_parrot.clip(testsite),
+  description: 'nypa_probability_parrot_island',
+  scale:       10,
+  region:      testsite.geometry(),
+  maxPixels:   1e13
+});
+
+Export.image.toDrive({
+  image:       nypaProb_direct.clip(apoi),
+  description: 'nypa_probability_apoi_direct_transfer',
+  scale:       10,
+  region:      apoi.geometry(),
+  maxPixels:   1e13
+});
+
+Export.image.toDrive({
+  image:       nypaProb_apoi.clip(apoi),
+  description: 'nypa_probability_apoi_local_model',
+  scale:       10,
+  region:      apoi.geometry(),
+  maxPixels:   1e13
+});
+
+/**********************
+ * X.x Probability maps - all classes (appendix)
+ **********************/
+
+// Class indices: 0=Nypa, 1=Mangrove, 2=Infrastructure, 3=Water
+var classNames  = ['Nypa', 'Mangrove and Other Forest', 'Infrastructure', 'Water'];
+var classIndex  = [0, 1, 2, 3];
+var classPalettes = [
+  ['white', '#EE3377'],  // Nypa - pink
+  ['white', '#228833'],  // Mangrove - green
+  ['white', '#BBBBBB'],  // Infrastructure - grey
+  ['white', '#4477AA']   // Water - blue
+];
+
+var classifiers = [
+  {classifier: probClassifier_parrot, image: embeddingsImage,  region: testsite, name: 'Parrot_Island'},
+  {classifier: probClassifier_direct, image: apoiEmbeddings,   region: apoi,     name: 'Apoi_Direct'},
+  {classifier: probClassifier_apoi,   image: apoiEmbeddings,   region: apoi,     name: 'Apoi_Local'}
+];
+
+classifiers.forEach(function(model) {
+  var probImage = model.image.classify(model.classifier);
+  
+  classIndex.forEach(function(idx) {
+    var classProb = probImage.arrayGet(idx);
+    var className = classNames[idx];
+    
+    Map.addLayer(
+      classProb,
+      {min: 0, max: 1, palette: classPalettes[idx]},
+      'Prob - ' + model.name + ' - ' + className
+    );
+    
+    Export.image.toDrive({
+      image:       classProb.clip(model.region),
+      description: 'prob_' + model.name + '_' + className,
+      scale:       10,
+      region:      model.region.geometry(),
+      maxPixels:   1e13
+    });
+  });
+});
