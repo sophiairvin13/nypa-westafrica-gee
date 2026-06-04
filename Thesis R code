@@ -1,0 +1,499 @@
+TRAINING DATA TABLE R CODE
+
+library(flextable)
+> library(officer)
+> library(dplyr)
+> 
+> table_data <- read.csv(file.choose())
+> 
+> names(table_data)
+[1] "Site"                              
+[2] "Class"                             
+[3] "Number.of.Collected.Points..Total."
+[4] "Training..70..Total."              
+[5] "Validation...30..Total."           
+[6] "Validation..Post.Filter."          
+> 
+> table_data$Site <- c('Parrot Island', 'Parrot Island', 'Parrot Island', 'Parrot Island',
++                      'Apoi', 'Apoi', 'Apoi', 'Apoi')
+> 
+> col_total    <- names(table_data)[3]
+> col_training <- names(table_data)[4]
+> col_val_pre  <- names(table_data)[5]
+> col_val_post <- names(table_data)[6]
+> 
+> parrot_total <- data.frame(
++     Site  = 'Parrot Island',
++     Class = 'Total'
++ )
+> parrot_total[[col_total]]    <- sum(table_data[1:4, col_total])
+> parrot_total[[col_training]] <- sum(table_data[1:4, col_training])
+> parrot_total[[col_val_pre]]  <- sum(table_data[1:4, col_val_pre])
+> parrot_total[[col_val_post]] <- sum(table_data[1:4, col_val_post])
+> 
+> apoi_total <- data.frame(
++     Site  = 'Apoi',
++     Class = 'Total'
++ )
+> apoi_total[[col_total]]    <- sum(table_data[5:8, col_total])
+> apoi_total[[col_training]] <- sum(table_data[5:8, col_training])
+> apoi_total[[col_val_pre]]  <- sum(table_data[5:8, col_val_pre])
+> apoi_total[[col_val_post]] <- sum(table_data[5:8, col_val_post])
+> 
+> table_final <- bind_rows(
++     table_data[1:4, ],
++     parrot_total,
++     table_data[5:8, ],
++     apoi_total
++ )
+> 
+> ft <- flextable(table_final) %>%
++     
++     set_header_labels(
++         Site  = 'Site',
++         Class = 'Class'
++     ) %>%
++     set_header_labels(
++         values = setNames(
++             list('Total\nPoints', 'Training\n(70%)',
++                  'Validation\n(pre-filter)', 'Validation\n(post-filter)'),
++             c(col_total, col_training, col_val_pre, col_val_post)
++         )
++     ) %>%
++     
++     italic(j = 'Class', i = c(1, 6)) %>%
++     
++     bold(i = c(5, 10)) %>%
++     
++     merge_at(i = 1:5, j = 1) %>%
++     merge_at(i = 6:10, j = 1) %>%
++     
++     align(align = 'center', part = 'all') %>%
++     align(j = c('Site', 'Class'), align = 'left', part = 'all') %>%
++     
++     font(fontname = 'Times New Roman', part = 'all') %>%
++     fontsize(size = 11, part = 'all') %>%
++     
++     border_remove() %>%
++     hline_top(border = fp_border(width = 1.5), part = 'header') %>%
++     hline_bottom(border = fp_border(width = 1),   part = 'header') %>%
++     hline_bottom(border = fp_border(width = 1.5), part = 'body') %>%
++     hline(i = 4, border = fp_border(width = 0.5, style = 'dashed')) %>%
++     hline(i = 5, border = fp_border(width = 1)) %>%
++     hline(i = 9, border = fp_border(width = 0.5, style = 'dashed')) %>%
++     
++     width(j = 'Site',       width = 1.2) %>%
++     width(j = 'Class',      width = 1.6) %>%
++     width(j = col_total,    width = 1.0) %>%
++     width(j = col_training, width = 1.0) %>%
++     width(j = col_val_pre,  width = 1.2) %>%
++     width(j = col_val_post, width = 1.2) %>%
++     
++     add_footer_lines('Note: Validation points were spatially filtered to exclude any point within 50 m of a training point to ensure spatial independence between training and validation sets.') %>%
++     font(fontname = 'Times New Roman', part = 'footer') %>%
++     fontsize(size = 9, part = 'footer') %>%
++     italic(part = 'footer')
+> 
+> save_as_docx(ft, path = 'training_validation_counts.docx')
+> ft
+
+CONFUSION MATRICES
+
+library(caret)
+library(ggplot2)
+library(dplyr)
+library(patchwork)
+
+class_labels  <- c("Nypa", "Mangrove", "Infrastructure", "Water")
+class_levels  <- c(0, 1, 2, 3)
+gradient_high <- "#444444"
+create_matrix <- function(file_path, plot_title, show_legend = FALSE,
+                          show_y_axis = FALSE, show_x_label = FALSE) {
+  
+  data <- read.csv(file_path) %>%
+    select(class, classification) %>%
+    mutate(
+      class          = factor(class,          levels = class_levels, labels = class_labels),
+      classification = factor(classification, levels = class_levels, labels = class_labels)
+    )
+  cm <- confusionMatrix(data$classification, data$class)
+  oa_label <- sprintf("Overall Accuracy = %.1f%%", cm$overall["Accuracy"] * 100)
+  plt_norm <- as.data.frame(cm$table) %>%
+    group_by(Reference) %>%
+    mutate(Proportion = Freq / sum(Freq)) %>%
+    ungroup()
+  ggplot(plt_norm, aes(x = Reference, y = Prediction, fill = Proportion)) +
+    geom_tile(colour = "white", linewidth = 0.8) +
+    geom_text(aes(label = round(Proportion, 2)),
+              size     = 5.5,
+              colour   = ifelse(plt_norm$Proportion > 0.5, "white", "grey20"),
+              fontface = "bold") +
+    scale_fill_gradient(
+      low    = "white",
+      high   = gradient_high,
+      limits = c(0, 1),
+      name   = "Proportion\nof actual class",
+      guide  = guide_colorbar(
+        barheight = unit(12, "cm"),  # stretch legend to match panel height
+        barwidth  = unit(0.6, "cm")
+      )
+    ) +
+    labs(
+      title    = plot_title,
+      subtitle = oa_label,
+      x        = if (show_x_label) "Actual (Ground Truth)" else NULL,
+      y        = if (show_y_axis)  "Predicted Class" else NULL
+    ) +
+    theme_minimal() +
+    theme(
+      axis.text.x     = element_text(angle = 45, hjust = 1, colour = "black", size = 14),
+      axis.text.y     = if (show_y_axis) {
+                          element_text(angle = 45, hjust = 1, colour = "black", size = 14)
+                        } else {
+                          element_blank()
+                        },
+      axis.title.x    = if (show_x_label) element_text(size = 15, face = "bold") else element_blank(),
+      axis.title.y    = if (show_y_axis)  element_text(size = 15, face = "bold") else element_blank(),
+      axis.ticks.y    = if (show_y_axis)  element_line() else element_blank(),
+      panel.grid      = element_blank(),
+      aspect.ratio    = 1,
+      plot.title      = element_text(face = "bold", hjust = 0.5, size = 15),
+      plot.subtitle   = element_text(hjust = 0.5, colour = "grey40", size = 13),
+      legend.position = if (show_legend) "right" else "none",
+      legend.title    = element_text(size = 13),
+      legend.text     = element_text(size = 12),
+      plot.margin     = margin(5, 0, 5, 0)
+    ) +
+    coord_fixed()
+}
+p1 <- create_matrix(
+  file.choose(),  # testsite_validation_Results.csv
+  "Parrot Island: Local Model",
+  show_legend  = FALSE,
+  show_y_axis  = TRUE,
+  show_x_label = FALSE
+)
+p2 <- create_matrix(
+  file.choose(),  # apoi_validation_results.csv
+  "Apoi: Direct Transfer",
+  show_legend  = FALSE,
+  show_y_axis  = FALSE,
+  show_x_label = TRUE
+)
+p3 <- create_matrix(
+  file.choose(),  # apoi_trained_predictions.csv
+  "Apoi: Local Model",
+  show_legend  = TRUE,
+  show_y_axis  = FALSE,
+  show_x_label = FALSE
+)
+combined <- (p1 | p2 | p3) +
+  plot_layout(guides = "collect")
+combined
+ggsave("confusion_matrices_combined.png",
+       plot   = combined,
+       width  = 18,
+       height = 7,
+       dpi    = 300,
+       bg     = "white")
+message("Saved: confusion_matrices_combined.png")
+
+PER CLASS ACCURACY FIGURE
+
+library(caret)
+> library(ggplot2)
+> library(ggtext)
+> library(dplyr)
+> library(tidyr)
+> library(patchwork)
+> 
+> class_labels  <- c("Nypa", "Mangrove", "Infrastructure", "Water")
+> class_levels  <- c(0, 1, 2, 3)
+> 
+> class_colours <- c(
++     "Nypa"           = "#EE3377",
++     "Mangrove"       = "#228833",
++     "Infrastructure" = "#BBBBBB",
++     "Water"          = "#4477AA"
++ )
+> 
+> label_PI  <- "<span style='color:#3355AA'>**Parrot Island**<br>**Local Model**</span>"
+> label_AD  <- "<span style='color:#AA3355'>**Apoi**<br>**Direct Transfer**</span>"
+> label_AL  <- "<span style='color:#228833'>**Apoi**<br>**Local Model**</span>"
+> 
+> get_metrics <- function(file_path, model_name) {
++     data <- read.csv(file_path) %>%
++         select(class, classification) %>%
++         mutate(
++             class          = factor(class,          levels = class_levels, labels = class_labels),
++             classification = factor(classification, levels = class_levels, labels = class_labels)
++         )
++     cm <- confusionMatrix(data$classification, data$class)
++     tibble(
++         model     = model_name,
++         class     = class_labels,
++         producers = as.numeric(cm$byClass[, "Sensitivity"]),
++         consumers = as.numeric(cm$byClass[, "Pos Pred Value"]),
++         f1        = as.numeric(cm$byClass[, "F1"])
++     )
++ }
+> 
+> m1 <- get_metrics(file.choose(), label_PI)  # testsite_validation_Results.csv
+> m2 <- get_metrics(file.choose(), label_AD)  # apoi_validation_results.csv
+> m3 <- get_metrics(file.choose(), label_AL)  # apoi_trained_predictions.csv
+> 
+> all_metrics <- bind_rows(m1, m2, m3) %>%
++     mutate(
++         model = factor(model, levels = c(label_PI, label_AD, label_AL)),
++         class = factor(class, levels = class_labels)
++     ) %>%
++     pivot_longer(
++         cols      = c(producers, consumers, f1),
++         names_to  = "metric",
++         values_to = "value"
++     ) %>%
++     mutate(metric = factor(metric,
++                            levels = c("producers", "consumers", "f1"),
++                            labels = c("(a) Producer's Accuracy",
++                                       "(b) Consumer's Accuracy",
++                                       "(c) F1 Score")))
+> 
+> fig <- ggplot(all_metrics, aes(x = model, y = value, fill = class)) +
++     
++     # Reference line at 0.9
++     geom_hline(yintercept = 0.9, linetype = "dashed",
++                colour = "grey50", linewidth = 0.5) +
++     
++     # Bars
++     geom_bar(stat     = "identity",
++              position = position_dodge(width = 0.75),
++              width    = 0.7) +
++     
++     scale_fill_manual(values = class_colours, name = NULL) +
++     scale_y_continuous(
++         limits = c(0, 1.05),
++         breaks = seq(0, 1, 0.2),
++         expand = c(0, 0)
++     ) +
++     
++     facet_wrap(~ metric, ncol = 3) +
++     
++     labs(x = NULL, y = "Accuracy / F1 Score") +
++     
++     theme_classic() +
++     theme(
++         strip.text       = element_text(face = "bold", size = 11),
++         strip.background = element_blank(),
++         axis.text.x      = element_markdown(size = 9, hjust = 0.5),
++         axis.text.y      = element_text(size = 9),
++         axis.title.y     = element_text(size = 10, face = "bold",
++                                         margin = margin(r = 10)),
++         legend.position  = "right",
++         legend.text      = element_text(size = 10),
++         panel.border     = element_rect(colour = "grey80", fill = NA),
++         plot.margin      = margin(10, 10, 10, 10)
++     )
+> 
+> fig
+> 
+> ggsave("per_class_accuracy.png",
++        plot   = fig,
++        width  = 12,
++        height = 5,
++        dpi    = 300,
++        bg     = "white")
+> 
+> message("Saved: per_class_accuracy.png")
+
+# NYPA PROBABILITY MAPS
+
+library(terra)
+library(tidyterra)
+library(ggplot2)
+library(patchwork)
+
+folder <- "/Users/sophiairvin/Desktop/probability tifs/"
+plot_prob_map <- function(file_path, plot_title, show_legend = FALSE) {
+  r <- rast(file_path)
+  ggplot() +
+    geom_spatraster(data = r) +
+    scale_fill_gradient(
+      low      = "white",
+      high     = "#EE3377",
+      limits   = c(0, 1),
+      name     = "Nypa\nProbability",
+      na.value = "transparent"
+    ) +
+    labs(title = plot_title) +
+    theme_void() +
+    theme(
+      plot.title       = element_text(face = "bold", hjust = 0.5, size = 11),
+      legend.position  = if (show_legend) "right" else "none",
+      legend.title     = element_text(size = 10, face = "bold"),
+      legend.text      = element_text(size = 9),
+      legend.key.height = unit(3, "cm"),
+      legend.key.width  = unit(0.5, "cm"),
+      plot.margin      = margin(5, 5, 5, 5)
+    )
+}
+p1 <- plot_prob_map(
+  paste0(folder, "nypa_probability_parrot_island.tif"),
+  "Parrot Island",
+  show_legend = FALSE
+)
+p2 <- plot_prob_map(
+  paste0(folder, "nypa_probability_apoi_direct_transfer.tif"),
+  "Apoi Direct Transfer",
+  show_legend = FALSE
+)
+p3 <- plot_prob_map(
+  paste0(folder, "nypa_probability_apoi_local_model.tif"),
+  "Apoi Local Model",
+  show_legend = TRUE
+)
+combined <- (p1 | p2 | p3) +
+  plot_layout(guides = "collect") +
+  plot_annotation(
+    tag_levels = "a",
+    theme = theme(
+      plot.tag = element_text(face = "bold", size = 12)
+    )
+  )
+combined
+ggsave("nypa_probability_maps.png",
+       plot   = combined,
+       width  = 14,
+       height = 5,
+       dpi    = 300,
+       bg     = "white")
+message("Saved: nypa_probability_maps.png")
+
+# ALL CLASSES PROBABILITY MAPS
+
+library(terra)
+library(tidyterra)
+library(ggplot2)
+library(patchwork)
+library(cowplot)
+
+folder <- "/Users/sophiairvin/Desktop/probability tifs/"
+pal_nypa  <- c("white", "#EE3377")
+pal_mang  <- c("white", "#228833")
+pal_infra <- c("white", "#555555")
+pal_water <- c("white", "#4477AA")
+plot_prob <- function(file_path, palette,
+                      legend_title = "Probability",
+                      show_legend = FALSE) {
+  r <- rast(file_path)
+ 
+  ggplot() +
+    geom_spatraster(data = r) +
+    scale_fill_gradient(
+      low      = palette[1],
+      high     = palette[2],
+      limits   = c(0, 1),
+      name     = legend_title,
+      na.value = "transparent"
+    ) +
+    theme_void() +
+    theme(
+      legend.position   = if (show_legend) "bottom" else "none",
+      legend.key.width  = unit(1.5, "cm"),
+      legend.key.height = unit(0.4, "cm"),
+      legend.title      = element_text(size = 12, face = "bold"),
+      legend.text       = element_text(size = 11),
+      plot.margin       = margin(1, 3, 1, 3)
+    )
+}
+make_header <- function(text) {
+  ggplot() +
+    annotate("text", x = 0.5, y = 0.5, label = text,
+             fontface = "bold", size = 6, hjust = 0.5) +
+    theme_void()
+}
+make_row_label <- function(text) {
+  ggplot() +
+    annotate("text", x = 0.5, y = 0.5, label = text,
+             fontface = "bold", size = 5, angle = 90, hjust = 0.5) +
+    theme_void()
+}
+
+# Row 1 — Parrot Island
+a1 <- plot_prob(paste0(folder, "prob_Parrot_Island_Nypa.tif"),                     pal_nypa)
+a2 <- plot_prob(paste0(folder, "prob_Parrot_Island_Mangrove and Other Forest.tif"), pal_mang)
+a3 <- plot_prob(paste0(folder, "prob_Parrot_Island_Infrastructure.tif"),            pal_infra)
+a4 <- plot_prob(paste0(folder, "prob_Parrot_Island_Water.tif"),                     pal_water)
+
+# Row 2 — Apoi Direct Transfer
+b1 <- plot_prob(paste0(folder, "prob_Apoi_Direct_Nypa.tif"),                        pal_nypa)
+b2 <- plot_prob(paste0(folder, "prob_Apoi_Direct_Mangrove and Other Forest.tif"),   pal_mang)
+b3 <- plot_prob(paste0(folder, "prob_Apoi_Direct_Infrastructure.tif"),              pal_infra)
+b4 <- plot_prob(paste0(folder, "prob_Apoi_Direct_Water.tif"),                       pal_water)
+
+# Row 3 — Apoi Local Model
+c1 <- plot_prob(paste0(folder, "prob_Apoi_Local_Nypa.tif"),                         pal_nypa)
+c2 <- plot_prob(paste0(folder, "prob_Apoi_Local_Mangrove and Other Forest.tif"),    pal_mang)
+c3 <- plot_prob(paste0(folder, "prob_Apoi_Local_Infrastructure.tif"),               pal_infra)
+c4 <- plot_prob(paste0(folder, "prob_Apoi_Local_Water.tif"),                        pal_water)
+make_legend <- function(palette, title) {
+  r <- rast(paste0(folder, "prob_Parrot_Island_Nypa.tif")) * 0
+  p <- ggplot() +
+    geom_spatraster(data = r) +
+    scale_fill_gradient(low = palette[1], high = palette[2],
+                        limits = c(0, 1), name = title,
+                        na.value = "transparent") +
+    theme_void() +
+    theme(
+      legend.position  = "bottom",
+      legend.key.width  = unit(2, "cm"),
+      legend.key.height = unit(0.5, "cm"),
+      legend.title      = element_text(size = 12, face = "bold"),
+      legend.text       = element_text(size = 11)
+    )
+  cowplot::get_legend(p)
+}
+h0 <- plot_spacer()
+h1 <- make_header("Nypa")
+h2 <- make_header("Mangrove")
+h3 <- make_header("Infrastructure")
+h4 <- make_header("Water")
+r1 <- make_row_label("Parrot Island\nLocal Model")
+r2 <- make_row_label("Apoi\nDirect Transfer")
+r3 <- make_row_label("Apoi\nLocal Model")
+header_row <- (h0 | h1 | h2 | h3 | h4) +
+  plot_layout(widths = c(0.12, 1, 1, 1, 1))
+row1 <- (r1 | a1 | a2 | a3 | a4) +
+  plot_layout(widths = c(0.12, 1, 1, 1, 1))
+row2 <- (r2 | b1 | b2 | b3 | b4) +
+  plot_layout(widths = c(0.12, 1, 1, 1, 1))
+row3 <- (r3 | c1 | c2 | c3 | c4) +
+  plot_layout(widths = c(0.12, 1, 1, 1, 1))
+map_grid <- (header_row / row1 / row2 / row3) +
+  plot_layout(heights = c(0.08, 1, 0.85, 0.85))
+leg_nypa  <- make_legend(pal_nypa,  "Nypa")
+leg_mang  <- make_legend(pal_mang,  "Mangrove")
+leg_infra <- make_legend(pal_infra, "Infrastructure")
+leg_water <- make_legend(pal_water, "Water")
+legend_row <- plot_grid(leg_nypa, leg_mang, leg_infra, leg_water,
+                        nrow = 1)
+final_fig <- plot_grid(
+  map_grid,
+  legend_row,
+  ncol        = 1,
+  rel_heights = c(1, 0.06)
+)
+title <- ggplot() +
+  annotate("text", x = 0.5, y = 0.5,
+           label    = "Per-class Classification Probability Maps",
+           fontface = "bold", size = 7, hjust = 0.5) +
+  theme_void()
+
+appendix_fig <- plot_grid(title, final_fig,
+                          ncol = 1, rel_heights = c(0.03, 1))
+appendix_fig
+ggsave("appendix_probability_maps.png", appendix_fig,
+       width  = 18,
+       height = 15,
+       dpi    = 300,
+       bg     = "white")
+message("Saved: appendix_probability_maps.png")
